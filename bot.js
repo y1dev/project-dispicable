@@ -179,6 +179,30 @@ const commands = [
   new SlashCommandBuilder()
     .setName('serverbanner')
     .setDescription('Show the server banner if available.'),
+
+  new SlashCommandBuilder()
+    .setName('tempban')
+    .setDescription('Temporarily ban a user.')
+    .addUserOption(option => option.setName('user').setDescription('The user to ban').setRequired(true))
+    .addIntegerOption(option => option.setName('hours').setDescription('Ban duration in hours').setRequired(true))
+    .addStringOption(option => option.setName('reason').setDescription('Reason for ban').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+
+  new SlashCommandBuilder()
+    .setName('clearwarnings')
+    .setDescription('Clear all warnings for a user.')
+    .addUserOption(option => option.setName('user').setDescription('The user to clear warnings for').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('report')
+    .setDescription('Report a user to moderators.')
+    .addUserOption(option => option.setName('user').setDescription('The user to report').setRequired(true))
+    .addStringOption(option => option.setName('reason').setDescription('Reason for report').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('trivia')
+    .setDescription('Get a trivia question.'),
 ];
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -208,7 +232,7 @@ client.on('interactionCreate', async interaction => {
   const guild = interaction.guild;
 
   // Check for Race Control role for moderation commands
-  const moderationCommands = ['kick', 'ban', 'mute', 'unmute', 'warn', 'warnings', 'purge', 'nick', 'roleadd', 'roleremove', 'lock', 'unlock', 'slowmode', 'announce'];
+  const moderationCommands = ['kick', 'ban', 'mute', 'unmute', 'warn', 'warnings', 'purge', 'nick', 'roleadd', 'roleremove', 'lock', 'unlock', 'slowmode', 'announce', 'tempban', 'clearwarnings'];
   if (moderationCommands.includes(commandName)) {
     const raceControlRole = guild.roles.cache.find(role => role.name === 'Race Control');
     if (!raceControlRole || !member.roles.cache.has(raceControlRole.id)) {
@@ -571,6 +595,81 @@ client.on('interactionCreate', async interaction => {
         if (botLogsChannelServerbanner) {
           await botLogsChannelServerbanner.send(`**Serverbanner Command Used**\nUser: ${interaction.user.tag}\nTimestamp: ${new Date().toISOString()}`);
         }
+        break;
+
+      case 'tempban':
+        const tempbanUser = interaction.options.getUser('user');
+        const tempbanHours = interaction.options.getInteger('hours');
+        const tempbanReason = interaction.options.getString('reason') || 'No reason provided';
+        await guild.members.ban(tempbanUser, { reason: tempbanReason });
+        await interaction.reply({ content: `Temporarily banned ${tempbanUser.tag} for ${tempbanHours} hours. Reason: ${tempbanReason}`, ephemeral: true });
+        const botLogsChannelTempban = await getBotLogsChannel(guild);
+        if (botLogsChannelTempban) {
+          await botLogsChannelTempban.send(`**Tempban Command Used**\nUser: ${interaction.user.tag}\nTarget: ${tempbanUser.tag}\nDuration: ${tempbanHours} hours\nReason: ${tempbanReason}\nTimestamp: ${new Date().toISOString()}`);
+        }
+        setTimeout(async () => {
+          try {
+            await guild.bans.remove(tempbanUser.id, 'Temporary ban expired');
+          } catch (err) {
+            console.error(`Failed to unban ${tempbanUser.tag}: ${err}`);
+          }
+        }, tempbanHours * 3600000);
+        break;
+
+      case 'clearwarnings':
+        const clearUser = interaction.options.getUser('user');
+        warnings.delete(clearUser.id);
+        await interaction.reply({ content: `Cleared all warnings for ${clearUser.tag}.`, ephemeral: true });
+        const botLogsChannelClearwarnings = await getBotLogsChannel(guild);
+        if (botLogsChannelClearwarnings) {
+          await botLogsChannelClearwarnings.send(`**Clearwarnings Command Used**\nUser: ${interaction.user.tag}\nTarget: ${clearUser.tag}\nTimestamp: ${new Date().toISOString()}`);
+        }
+        break;
+
+      case 'report':
+        const reportUser = interaction.options.getUser('user');
+        const reportReason = interaction.options.getString('reason');
+        const botReportsChannel = guild.channels.cache.find(channel => channel.name === 'bot-reports');
+        if (!botReportsChannel) {
+          return interaction.reply({ content: 'bot-reports channel not found. Please create a channel named "bot-reports".', ephemeral: true });
+        }
+        const reportEmbed = new EmbedBuilder()
+          .setTitle('User Report')
+          .addFields(
+            { name: 'Reporter', value: interaction.user.tag, inline: true },
+            { name: 'Reported User', value: reportUser.tag, inline: true },
+            { name: 'Reason', value: reportReason, inline: false },
+            { name: 'Timestamp', value: new Date().toISOString(), inline: false }
+          )
+          .setColor(0xff0000);
+        await botReportsChannel.send({ embeds: [reportEmbed] });
+        await interaction.reply({ content: 'Your report has been submitted to the moderators.', ephemeral: true });
+        break;
+
+      case 'trivia':
+        const triviaQuestions = [
+          { question: 'What is the capital of France?', answers: ['Paris'] },
+          { question: 'What is the largest planet in our solar system?', answers: ['Jupiter'] },
+          { question: 'Who wrote Romeo and Juliet?', answers: ['Shakespeare', 'William Shakespeare'] },
+          { question: 'What is the chemical symbol for gold?', answers: ['Au'] },
+          { question: 'In what year did the Titanic sink?', answers: ['1912'] },
+          { question: 'What is the smallest country in the world?', answers: ['Vatican City'] },
+          { question: 'How many continents are there?', answers: ['7'] },
+          { question: 'What is the fastest land animal?', answers: ['Cheetah'] },
+          { question: 'Who painted the Mona Lisa?', answers: ['Leonardo da Vinci'] },
+          { question: 'What is the highest mountain in the world?', answers: ['Mount Everest'] },
+          { question: 'How many sides does a hexagon have?', answers: ['6'] },
+          { question: 'What is the deepest ocean?', answers: ['Pacific Ocean'] },
+          { question: 'Who invented the telephone?', answers: ['Alexander Graham Bell'] },
+          { question: 'What is the chemical symbol for silver?', answers: ['Ag'] },
+          { question: 'In what country is the Great Wall located?', answers: ['China'] }
+        ];
+        const randomTrivia = triviaQuestions[Math.floor(Math.random() * triviaQuestions.length)];
+        const triviaEmbed = new EmbedBuilder()
+          .setTitle('Trivia Question')
+          .setDescription(randomTrivia.question)
+          .setColor(0x00ff00);
+        await interaction.reply({ embeds: [triviaEmbed] });
         break;
 
       default:
