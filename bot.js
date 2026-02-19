@@ -16,10 +16,37 @@ const GUILD_ID = '1449765717942472868';
 
 let startTime = Date.now();
 const warnings = new Map(); // In-memory storage for warnings
+const moderationLogs = []; // Store all moderation actions
 
 // Function to get bot-logs channel
 async function getBotLogsChannel(guild) {
   return guild.channels.cache.find(channel => channel.name === 'bot-logs');
+}
+
+// Function to log moderation action
+function logModerationAction(action) {
+  moderationLogs.push({
+    ...action,
+    timestamp: new Date()
+  });
+}
+
+// Function to send DM to user
+async function sendModerationDM(user, title, reason, duration = null) {
+  try {
+    const dmEmbed = new EmbedBuilder()
+      .setTitle(title)
+      .addFields(
+        { name: 'Reason', value: reason || 'No reason provided', inline: false }
+      );
+    if (duration) {
+      dmEmbed.addFields({ name: 'Duration', value: duration, inline: false });
+    }
+    dmEmbed.setColor(0xff0000);
+    await user.send({ embeds: [dmEmbed] });
+  } catch (error) {
+    console.log(`Could not DM ${user.tag}: ${error.message}`);
+  }
 }
 
 const commands = [
@@ -203,6 +230,18 @@ const commands = [
   new SlashCommandBuilder()
     .setName('trivia')
     .setDescription('Get a trivia question.'),
+
+  new SlashCommandBuilder()
+    .setName('unban')
+    .setDescription('Unban a user from the server.')
+    .addUserOption(option => option.setName('user').setDescription('The user to unban').setRequired(true))
+    .addStringOption(option => option.setName('reason').setDescription('Reason for unbanning').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+
+  new SlashCommandBuilder()
+    .setName('logs')
+    .setDescription('View moderation logs.')
+    .addIntegerOption(option => option.setName('limit').setDescription('Number of logs to show (default 10)').setRequired(false)),
 ];
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -232,21 +271,23 @@ client.on('interactionCreate', async interaction => {
   const guild = interaction.guild;
 
   // Check for Race Control role for moderation commands
-  const moderationCommands = ['kick', 'ban', 'mute', 'unmute', 'warn', 'warnings', 'purge', 'nick', 'roleadd', 'roleremove', 'lock', 'unlock', 'slowmode', 'announce', 'tempban', 'clearwarnings'];
+  const moderationCommands = ['kick', 'ban', 'mute', 'unmute', 'warn', 'warnings', 'purge', 'nick', 'roleadd', 'roleremove', 'lock', 'unlock', 'slowmode', 'announce', 'tempban', 'clearwarnings', 'unban', 'logs'];
   if (moderationCommands.includes(commandName)) {
     const raceControlRole = guild.roles.cache.find(role => role.name === 'Race Control');
     if (!raceControlRole || !member.roles.cache.has(raceControlRole.id)) {
       return interaction.reply({ content: 'You do not have the Race Control role to use this command.', ephemeral: true });
     }
-  }
-
-  try {
-    switch (commandName) {
-      case 'kick':
-        const kickUser = interaction.options.getUser('user');
-        const kickReason = interaction.options.getString('reason') || 'No reason provided';
+    // Additional validation: ensure executor is not trying to action on higher roles
+    if (['kick', 'ban', 'mute', 'unmute', 'tempban', 'unban'].includes(commandName)) {
+      const targetUser = interaction.options.getUser('user');
+      const targetMember = await guild.members.fetch(targetUser.id).catch(() => null);
+      if (targetMember && targetMember.roles.highest.position >= member.roles.highest.position) {
+        return interaction.reply({ content: 'You cannot perform actions on users with equal or higher roles.', ephemeral: true });
+      }
         const kickMember = await guild.members.fetch(kickUser.id);
         await kickMember.kick(kickReason);
+        await sendModerationDM(kickUser, 'You have been kicked', kickReason);
+        logModerationAction({ action: 'kick', executor: interaction.user.tag, target: kickUser.tag, reason: kickReason });
         await interaction.reply({ content: `Kicked ${kickUser.tag} for: ${kickReason}`, ephemeral: true });
         const botLogsChannel = await getBotLogsChannel(guild);
         if (botLogsChannel) {
@@ -258,6 +299,8 @@ client.on('interactionCreate', async interaction => {
         const banUser = interaction.options.getUser('user');
         const banReason = interaction.options.getString('reason') || 'No reason provided';
         await guild.members.ban(banUser, { reason: banReason });
+        await sendModerationDM(banUser, 'You have been banned', banReason);
+        logModerationAction({ action: 'ban', executor: interaction.user.tag, target: banUser.tag, reason: banReason });
         await interaction.reply({ content: `Banned ${banUser.tag} for: ${banReason}`, ephemeral: true });
         const botLogsChannelBan = await getBotLogsChannel(guild);
         if (botLogsChannelBan) {
@@ -272,6 +315,8 @@ client.on('interactionCreate', async interaction => {
         const muteRole = guild.roles.cache.find(role => role.name === 'Muted');
         if (!muteRole) return interaction.reply('Muted role not found. Please create a role named "Muted".');
         await muteMember.roles.add(muteRole);
+        await sendModerationDM(muteUser, 'You have been muted', 'Check channel for reason', `${muteTime} minutes`);
+        logModerationAction({ action: 'mute', executor: interaction.user.tag, target: muteUser.tag, duration: `${muteTime} minutes` });
         setTimeout(async () => {
           await muteMember.roles.remove(muteRole);
         }, muteTime * 60000);
@@ -301,10 +346,12 @@ client.on('interactionCreate', async interaction => {
         const userWarnings = warnings.get(warnUser.id) || [];
         userWarnings.push({ reason: warnReason, date: new Date() });
         warnings.set(warnUser.id, userWarnings);
-        await interaction.reply({ content: `Warned ${warnUser.tag} for: ${warnReason}`, ephemeral: true });
+        await sendModerationDM(warnUser, 'You have been warned', warnReason);
+        logModerationAction({ action: 'warn', executor: interaction.user.tag, target: warnUser.tag, reason: warnReason, warningCount: userWarnings.length });
+        await interaction.reply({ content: `Warned ${warnUser.tag} for: ${warnReason} (Total warnings: ${userWarnings.length})`, ephemeral: true });
         const botLogsChannelWarn = await getBotLogsChannel(guild);
         if (botLogsChannelWarn) {
-          await botLogsChannelWarn.send(`**Warn Command Used**\nUser: ${interaction.user.tag}\nTarget: ${warnUser.tag}\nReason: ${warnReason}\nTimestamp: ${new Date().toISOString()}`);
+          await botLogsChannelWarn.send(`**Warn Command Used**\nUser: ${interaction.user.tag}\nTarget: ${warnUser.tag}\nReason: ${warnReason}\nTotal Warnings: ${userWarnings.length}\nTimestamp: ${new Date().toISOString()}`);
         }
         break;
 
@@ -602,6 +649,8 @@ client.on('interactionCreate', async interaction => {
         const tempbanHours = interaction.options.getInteger('hours');
         const tempbanReason = interaction.options.getString('reason') || 'No reason provided';
         await guild.members.ban(tempbanUser, { reason: tempbanReason });
+        await sendModerationDM(tempbanUser, 'You have been temporarily banned', tempbanReason, `${tempbanHours} hours`);
+        logModerationAction({ action: 'tempban', executor: interaction.user.tag, target: tempbanUser.tag, duration: `${tempbanHours} hours`, reason: tempbanReason });
         await interaction.reply({ content: `Temporarily banned ${tempbanUser.tag} for ${tempbanHours} hours. Reason: ${tempbanReason}`, ephemeral: true });
         const botLogsChannelTempban = await getBotLogsChannel(guild);
         if (botLogsChannelTempban) {
@@ -618,11 +667,13 @@ client.on('interactionCreate', async interaction => {
 
       case 'clearwarnings':
         const clearUser = interaction.options.getUser('user');
+        const clearedCount = warnings.get(clearUser.id)?.length || 0;
         warnings.delete(clearUser.id);
-        await interaction.reply({ content: `Cleared all warnings for ${clearUser.tag}.`, ephemeral: true });
+        logModerationAction({ action: 'clearwarnings', executor: interaction.user.tag, target: clearUser.tag, clearedCount: clearedCount });
+        await interaction.reply({ content: `Cleared all ${clearedCount} warnings for ${clearUser.tag}.`, ephemeral: true });
         const botLogsChannelClearwarnings = await getBotLogsChannel(guild);
         if (botLogsChannelClearwarnings) {
-          await botLogsChannelClearwarnings.send(`**Clearwarnings Command Used**\nUser: ${interaction.user.tag}\nTarget: ${clearUser.tag}\nTimestamp: ${new Date().toISOString()}`);
+          await botLogsChannelClearwarnings.send(`**Clearwarnings Command Used**\nUser: ${interaction.user.tag}\nTarget: ${clearUser.tag}\nCleared Warnings: ${clearedCount}\nTimestamp: ${new Date().toISOString()}`);
         }
         break;
 
@@ -670,6 +721,34 @@ client.on('interactionCreate', async interaction => {
           .setDescription(randomTrivia.question)
           .setColor(0x00ff00);
         await interaction.reply({ embeds: [triviaEmbed] });
+        break;
+
+      case 'unban':
+        const unbanUser = interaction.options.getUser('user');
+        const unbanReason = interaction.options.getString('reason') || 'No reason provided';
+        await guild.bans.remove(unbanUser.id, unbanReason);
+        logModerationAction({ action: 'unban', executor: interaction.user.tag, target: unbanUser.tag, reason: unbanReason });
+        await interaction.reply({ content: `Unbanned ${unbanUser.tag}. Reason: ${unbanReason}`, ephemeral: true });
+        const botLogsChannelUnban = await getBotLogsChannel(guild);
+        if (botLogsChannelUnban) {
+          await botLogsChannelUnban.send(`**Unban Command Used**\nUser: ${interaction.user.tag}\nTarget: ${unbanUser.tag}\nReason: ${unbanReason}\nTimestamp: ${new Date().toISOString()}`);
+        }
+        break;
+
+      case 'logs':
+        const logLimit = interaction.options.getInteger('limit') || 10;
+        const recentLogs = moderationLogs.slice(-logLimit);
+        if (recentLogs.length === 0) {
+          return interaction.reply({ content: 'No moderation logs found.', ephemeral: true });
+        }
+        const logsEmbed = new EmbedBuilder()
+          .setTitle(`Last ${recentLogs.length} Moderation Actions`)
+          .setColor(0x0000ff);
+        recentLogs.forEach((log, index) => {
+          const logText = `**${log.action.toUpperCase()}** by ${log.executor} on ${log.target}${log.reason ? ` - Reason: ${log.reason}` : ''}${log.duration ? ` - Duration: ${log.duration}` : ''}${log.warningCount ? ` - Warnings: ${log.warningCount}` : ''}${log.clearedCount !== undefined ? ` - Cleared: ${log.clearedCount}` : ''}`;
+          logsEmbed.addFields({ name: `#${recentLogs.length - index}`, value: logText, inline: false });
+        });
+        await interaction.reply({ embeds: [logsEmbed], ephemeral: true });
         break;
 
       default:
